@@ -1,25 +1,51 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+import path_setup  # noqa: F401
+
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 
 from ai_service import evaluate_task, execute_agent_task
-from database import Base, SessionLocal, engine
+from database import Base, SessionLocal, engine, migrate_schema
 from models import Agent, Task, TaskStatus, Transaction, TransactionType, User, UserRole
-from schemas import AgentRead, EvaluationResponse, ExecutionResponse, SeedResponse, TaskCreate, TaskDetail, TaskRead
+from schemas import (
+    AgentRead,
+    EvaluationResponse,
+    ExecutionResponse,
+    SeedResponse,
+    SwarmHealthRead,
+    TaskCreate,
+    TaskDetail,
+    TaskRead,
+    ModelOptionRead,
+    WorkflowRunCreate,
+    WorkflowRunRead,
+    WorkflowRunSummary,
+    WorkflowTemplateRead,
+)
+from swarm_service import (
+    create_workflow_run,
+    execute_workflow_run,
+    get_models,
+    get_templates,
+    get_workflow_run,
+    list_workflow_runs,
+    llm_mode,
+)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    migrate_schema()
     yield
 
 
 app = FastAPI(
-    title="AI Agent Marketplace Demo",
-    description="Demo backend for a pay-for-success AI agent marketplace.",
-    version="1.0.0",
+    title="Agent Swarm Orchestrator",
+    description="Parallel DAG multi-agent swarm with marketplace demo endpoints.",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
@@ -72,7 +98,72 @@ def _get_task_or_404(db: Session, task_id: int) -> Task:
 
 @app.get("/")
 def healthcheck() -> dict[str, str]:
-    return {"message": "AI Agent Marketplace backend is running."}
+    return {"message": "Agent Swarm orchestrator backend is running."}
+
+
+@app.get("/swarm/health", response_model=SwarmHealthRead)
+def swarm_health() -> SwarmHealthRead:
+    templates = get_templates()
+    return SwarmHealthRead(
+        message="Swarm engine is ready.",
+        templates=[template["id"] for template in templates],
+        llm_mode=llm_mode(),
+    )
+
+
+@app.get("/swarm/models", response_model=list[ModelOptionRead])
+def swarm_models() -> list[ModelOptionRead]:
+    return [ModelOptionRead.model_validate(model) for model in get_models()]
+
+
+@app.get("/swarm/templates", response_model=list[WorkflowTemplateRead])
+def swarm_templates() -> list[WorkflowTemplateRead]:
+    return [WorkflowTemplateRead.model_validate(template) for template in get_templates()]
+
+
+@app.get("/swarm/templates/{template_id}", response_model=WorkflowTemplateRead)
+def swarm_template(template_id: str) -> WorkflowTemplateRead:
+    for template in get_templates():
+        if template["id"] == template_id:
+            return WorkflowTemplateRead.model_validate(template)
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Template not found.")
+
+
+@app.post("/swarm/runs", response_model=WorkflowRunRead, status_code=status.HTTP_201_CREATED)
+async def start_swarm_run(
+    payload: WorkflowRunCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    try:
+        run = create_workflow_run(
+            db,
+            {
+                "template_id": payload.template_id,
+                "product": payload.product,
+                "target_audience": payload.target_audience,
+                "brand_voice": payload.brand_voice,
+                "nodes": [node.model_dump() for node in payload.nodes],
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    background_tasks.add_task(execute_workflow_run, run.id, SessionLocal)
+    return get_workflow_run(db, run.id)
+
+
+@app.get("/swarm/runs", response_model=list[WorkflowRunSummary])
+def swarm_runs(db: Session = Depends(get_db)):
+    return list_workflow_runs(db)
+
+
+@app.get("/swarm/runs/{run_id}", response_model=WorkflowRunRead)
+def swarm_run(run_id: int, db: Session = Depends(get_db)):
+    try:
+        return get_workflow_run(db, run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @app.post("/users/seed", response_model=SeedResponse)
@@ -172,7 +263,7 @@ def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/tasks/{task_id}/execute", response_model=ExecutionResponse)
-async def execute_task(task_id: int, db: Session = Depends(get_db)):
+async def execute_task_endpoint(task_id: int, db: Session = Depends(get_db)):
     task = _get_task_or_404(db, task_id)
 
     if task.status != TaskStatus.PENDING:

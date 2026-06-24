@@ -1,10 +1,10 @@
 import type {
-  Agent,
-  EvaluationResponse,
-  SeedResponse,
-  TaskCreateInput,
-  TaskDetail,
-  TaskRead,
+  ModelOption,
+  SwarmHealth,
+  WorkflowRun,
+  WorkflowRunCreateInput,
+  WorkflowRunSummary,
+  WorkflowTemplate,
 } from "@/types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -40,20 +40,15 @@ async function request<T>(path: string, init?: RequestInitWithBody): Promise<T> 
 }
 
 export const api = {
-  seed: () => request<SeedResponse>("/users/seed", { method: "POST" }),
-  listAgents: () => request<Agent[]>("/agents"),
-  createTask: (payload: TaskCreateInput) =>
-    request<TaskRead>("/tasks", {
+  swarmHealth: () => request<SwarmHealth>("/swarm/health"),
+  listModels: () => request<ModelOption[]>("/swarm/models"),
+  listTemplates: () => request<WorkflowTemplate[]>("/swarm/templates"),
+  getTemplate: (templateId: string) => request<WorkflowTemplate>(`/swarm/templates/${templateId}`),
+  createRun: (payload: WorkflowRunCreateInput) =>
+    request<WorkflowRun>("/swarm/runs", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
-  executeTask: (taskId: number) =>
-    request<{ message: string; task: TaskRead }>(`/tasks/${taskId}/execute`, {
-      method: "POST",
-    }),
-  evaluateTask: (taskId: number) =>
-    request<EvaluationResponse>(`/tasks/${taskId}/evaluate`, {
-      method: "POST",
-    }),
-  getTask: (taskId: number) => request<TaskDetail>(`/tasks/${taskId}`),
+  listRuns: () => request<WorkflowRunSummary[]>("/swarm/runs"),
+  getRun: (runId: number) => request<WorkflowRun>(`/swarm/runs/${runId}`),
 };

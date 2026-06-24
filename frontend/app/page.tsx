@@ -1,451 +1,443 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { ActivityFeed } from "@/components/ActivityFeed";
+import { DagGraph } from "@/components/DagGraph";
+import { NodeInspector } from "@/components/NodeInspector";
+import { RunHistory } from "@/components/RunHistory";
 import { api } from "@/lib/api";
-import type { Agent, SeedResponse, TaskCreateInput, TaskDetail } from "@/types";
+import type {
+  ActivityEntry,
+  EditableNodeConfig,
+  ExecutionMode,
+  ModelOption,
+  SwarmHealth,
+  WorkflowNodeStatus,
+  WorkflowNodeTopology,
+  WorkflowRun,
+  WorkflowRunSummary,
+  WorkflowTemplate,
+} from "@/types";
 
-const defaultPrompt =
-  "Draft a short proposal for a retail analytics pilot focused on improving in-store conversions.";
-const defaultCriteria =
-  "Keep it concise, professional, and include deliverables, timeline, and expected business impact.";
-
-function currency(value: number) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  }).format(value);
+function formatTime(value: string | null) {
+  if (!value) {
+    return "--:--:--";
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(value));
 }
 
-function statusClass(status: string) {
-  return `status-pill ${status}`;
+function configsFromTopology(nodes: WorkflowNodeTopology[]): Record<string, EditableNodeConfig> {
+  return Object.fromEntries(
+    nodes.map((node) => [
+      node.id,
+      {
+        node_id: node.id,
+        task: node.task,
+        persona: node.persona,
+        model: node.model,
+        execution_mode: node.execution_mode,
+      },
+    ]),
+  );
 }
 
-export default function HomePage() {
-  const [seedData, setSeedData] = useState<SeedResponse | null>(null);
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [selectedAgentId, setSelectedAgentId] = useState<number | null>(null);
-  const [taskDetail, setTaskDetail] = useState<TaskDetail | null>(null);
-  const [taskIdInput, setTaskIdInput] = useState("");
-  const [prompt, setPrompt] = useState(defaultPrompt);
-  const [successCriteria, setSuccessCriteria] = useState(defaultCriteria);
-  const [isBusy, setIsBusy] = useState(false);
-  const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+function configsFromRun(run: WorkflowRun): Record<string, EditableNodeConfig> {
+  return Object.fromEntries(
+    run.node_runs.map((node) => [
+      node.node_id,
+      {
+        node_id: node.node_id,
+        task: node.task,
+        persona: node.persona,
+        model: node.configured_model,
+        execution_mode: node.execution_mode,
+      },
+    ]),
+  );
+}
 
-  const selectedAgent = agents.find((agent) => agent.id === selectedAgentId) ?? null;
+function buildNodeStatusMap(run: WorkflowRun | null): Record<string, WorkflowNodeStatus> {
+  if (!run) {
+    return {};
+  }
+  return Object.fromEntries(run.node_runs.map((node) => [node.node_id, node.status]));
+}
 
-  useEffect(() => {
-    void loadAgents();
-  }, []);
+function buildActivityLog(run: WorkflowRun | null, template: WorkflowTemplate | null): ActivityEntry[] {
+  if (!run || !template) {
+    return [];
+  }
 
-  async function loadAgents() {
-    try {
-      const nextAgents = await api.listAgents();
-      setAgents(nextAgents);
-      setSelectedAgentId((current) => current ?? nextAgents[0]?.id ?? null);
-    } catch (error) {
-      setMessage({
-        type: "error",
-        text: error instanceof Error ? error.message : "Could not load agents.",
+  const entries: ActivityEntry[] = [
+    {
+      id: `run-${run.id}-created`,
+      timestamp: formatTime(run.created_at),
+      kind: "info",
+      message: `Workflow run #${run.id} created for "${run.product}".`,
+    },
+  ];
+
+  const rootIds = new Set(template.topology.layers[0] ?? []);
+  const parallelRoots = run.node_runs.filter(
+    (node) => rootIds.has(node.node_id) && node.started_at,
+  );
+  if (parallelRoots.length > 1) {
+    entries.push({
+      id: `run-${run.id}-parallel`,
+      timestamp: formatTime(parallelRoots[0]?.started_at ?? run.created_at),
+      kind: "parallel",
+      message: `Parallel batch: ${parallelRoots.map((node) => node.node_name).join(", ")}`,
+    });
+  }
+
+  for (const node of run.node_runs) {
+    if (node.started_at) {
+      entries.push({
+        id: `run-${run.id}-${node.node_id}-start`,
+        timestamp: formatTime(node.started_at),
+        kind: "start",
+        message: `${node.node_name} started (${node.configured_model}, ${node.execution_mode}).`,
+      });
+    }
+    if (node.finished_at) {
+      entries.push({
+        id: `run-${run.id}-${node.node_id}-finish`,
+        timestamp: formatTime(node.finished_at),
+        kind: "finish",
+        message: `${node.node_name} finished (${node.used_mock ? "mock" : node.model ?? "llm"}).`,
       });
     }
   }
 
-  function showMessage(type: "success" | "error", text: string) {
-    setMessage({ type, text });
+  if (run.status === "completed") {
+    entries.push({
+      id: `run-${run.id}-complete`,
+      timestamp: formatTime(run.node_runs.at(-1)?.finished_at ?? run.created_at),
+      kind: "complete",
+      message: `Workflow completed in ${run.elapsed_seconds?.toFixed(2) ?? "?"}s.`,
+    });
   }
 
-  async function runAction<T>(action: () => Promise<T>) {
-    setIsBusy(true);
-    setMessage(null);
+  if (run.status === "failed" && run.error_message) {
+    entries.push({
+      id: `run-${run.id}-error`,
+      timestamp: formatTime(run.node_runs.at(-1)?.finished_at ?? run.created_at),
+      kind: "error",
+      message: run.error_message,
+    });
+  }
+
+  return entries.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+
+export default function HomePage() {
+  const [health, setHealth] = useState<SwarmHealth | null>(null);
+  const [models, setModels] = useState<ModelOption[]>([]);
+  const [template, setTemplate] = useState<WorkflowTemplate | null>(null);
+  const [nodeConfigs, setNodeConfigs] = useState<Record<string, EditableNodeConfig>>({});
+  const [product, setProduct] = useState("");
+  const [targetAudience, setTargetAudience] = useState("");
+  const [brandVoice, setBrandVoice] = useState("");
+  const [activeRun, setActiveRun] = useState<WorkflowRun | null>(null);
+  const [recentRuns, setRecentRuns] = useState<WorkflowRunSummary[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(true);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [isLaunching, setIsLaunching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const seenStatusRef = useRef<Record<string, WorkflowNodeStatus>>({});
+
+  const isRunLocked = activeRun?.status === "running" || activeRun?.status === "pending";
+  const nodeStatus = useMemo(() => buildNodeStatusMap(activeRun), [activeRun]);
+  const activity = useMemo(() => buildActivityLog(activeRun, template), [activeRun, template]);
+
+  const selectedTopologyNode =
+    template?.topology.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const selectedConfig = selectedNodeId ? nodeConfigs[selectedNodeId] ?? null : null;
+  const selectedRunNode = activeRun?.node_runs.find((node) => node.node_id === selectedNodeId) ?? null;
+
+  const nodeMeta = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.values(nodeConfigs).map((config) => [
+          config.node_id,
+          { model: config.model, execution_mode: config.execution_mode },
+        ]),
+      ),
+    [nodeConfigs],
+  );
+
+  const loadRecentRuns = useCallback(async () => {
+    setIsHistoryLoading(true);
     try {
-      return await action();
-    } catch (error) {
-      showMessage("error", error instanceof Error ? error.message : "Something went wrong.");
-      return null;
+      const runs = await api.listRuns();
+      setRecentRuns(runs);
     } finally {
-      setIsBusy(false);
+      setIsHistoryLoading(false);
     }
-  }
+  }, []);
 
-  async function handleSeed() {
-    const result = await runAction(() => api.seed());
-    if (!result) {
+  const loadBootstrap = useCallback(async () => {
+    const [healthResponse, modelOptions, templates] = await Promise.all([
+      api.swarmHealth(),
+      api.listModels(),
+      api.listTemplates(),
+    ]);
+    setHealth(healthResponse);
+    setModels(modelOptions);
+    const firstTemplate = templates[0] ?? null;
+    setTemplate(firstTemplate);
+    if (firstTemplate) {
+      setProduct(firstTemplate.default_product);
+      setTargetAudience(firstTemplate.default_target_audience);
+      setBrandVoice(firstTemplate.default_brand_voice);
+      setNodeConfigs(configsFromTopology(firstTemplate.topology.nodes));
+      setSelectedNodeId(firstTemplate.topology.nodes[0]?.id ?? null);
+    }
+    await loadRecentRuns();
+  }, [loadRecentRuns]);
+
+  useEffect(() => {
+    void loadBootstrap().catch((bootstrapError) => {
+      setError(bootstrapError instanceof Error ? bootstrapError.message : "Failed to connect to backend.");
+    });
+  }, [loadBootstrap]);
+
+  useEffect(() => {
+    if (!activeRun || (activeRun.status !== "pending" && activeRun.status !== "running")) {
       return;
     }
 
-    setSeedData(result);
-    setAgents(result.agents);
-    setSelectedAgentId(result.agents[0]?.id ?? null);
-    showMessage("success", result.message);
+    const interval = window.setInterval(() => {
+      void api
+        .getRun(activeRun.id)
+        .then((nextRun) => {
+          setActiveRun(nextRun);
+          setError(null);
+          if (nextRun.status === "completed" || nextRun.status === "failed") {
+            void loadRecentRuns();
+          }
+        })
+        .catch((pollError) => {
+          setError(pollError instanceof Error ? pollError.message : "Polling failed.");
+        });
+    }, 1000);
+
+    return () => window.clearInterval(interval);
+  }, [activeRun, loadRecentRuns]);
+
+  useEffect(() => {
+    if (!activeRun) {
+      return;
+    }
+    for (const node of activeRun.node_runs) {
+      seenStatusRef.current[node.node_id] = node.status;
+    }
+  }, [activeRun]);
+
+  function handleNodeConfigChange(nodeId: string, patch: Partial<EditableNodeConfig>) {
+    setNodeConfigs((current) => ({
+      ...current,
+      [nodeId]: { ...current[nodeId], ...patch },
+    }));
   }
 
-  async function handleCreateTask(event: FormEvent<HTMLFormElement>) {
+  async function handleLaunch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedAgentId) {
-      showMessage("error", "Choose an agent before creating a task.");
+    if (!template) {
+      setError("No workflow template loaded.");
       return;
     }
 
-    const clientId = seedData?.client.id ?? 1;
-    const payload: TaskCreateInput = {
-      client_id: clientId,
-      agent_id: selectedAgentId,
-      prompt,
-      success_criteria: successCriteria,
-    };
+    setIsLaunching(true);
+    setError(null);
+    seenStatusRef.current = {};
 
-    const createdTask = await runAction(() => api.createTask(payload));
-    if (!createdTask) {
-      return;
-    }
-
-    setTaskIdInput(String(createdTask.id));
-    const task = await runAction(() => api.getTask(createdTask.id));
-    if (task) {
-      setTaskDetail(task);
-      showMessage("success", `Task #${createdTask.id} created and escrow locked.`);
+    try {
+      const run = await api.createRun({
+        template_id: template.id,
+        product,
+        target_audience: targetAudience,
+        brand_voice: brandVoice,
+        nodes: Object.values(nodeConfigs),
+      });
+      setActiveRun(run);
+      setNodeConfigs(configsFromRun(run));
+      setSelectedNodeId(run.node_runs[0]?.node_id ?? null);
+      void loadRecentRuns();
+    } catch (launchError) {
+      setError(launchError instanceof Error ? launchError.message : "Could not launch workflow.");
+    } finally {
+      setIsLaunching(false);
     }
   }
 
-  async function handleLoadTask() {
-    const taskId = Number(taskIdInput);
-    if (!taskId) {
-      showMessage("error", "Enter a valid task id.");
-      return;
-    }
-
-    const task = await runAction(() => api.getTask(taskId));
-    if (task) {
-      setTaskDetail(task);
-      showMessage("success", `Loaded task #${task.id}.`);
-    }
-  }
-
-  async function handleExecuteTask() {
-    if (!taskDetail) {
-      showMessage("error", "Load or create a task first.");
-      return;
-    }
-
-    const result = await runAction(() => api.executeTask(taskDetail.id));
-    if (!result) {
-      return;
-    }
-
-    const refreshedTask = await runAction(() => api.getTask(taskDetail.id));
-    if (refreshedTask) {
-      setTaskDetail(refreshedTask);
-      showMessage("success", result.message);
+  async function handleSelectRun(runId: number) {
+    setError(null);
+    try {
+      const run = await api.getRun(runId);
+      setActiveRun(run);
+      setNodeConfigs(configsFromRun(run));
+      const firstCompleted = run.node_runs.find((node) => node.status === "completed");
+      setSelectedNodeId(firstCompleted?.node_id ?? run.node_runs[0]?.node_id ?? null);
+    } catch (selectError) {
+      setError(selectError instanceof Error ? selectError.message : "Could not load run.");
     }
   }
 
-  async function handleEvaluateTask() {
-    if (!taskDetail) {
-      showMessage("error", "Load or create a task first.");
+  function handleResetNodes() {
+    if (!template) {
       return;
     }
-
-    const result = await runAction(() => api.evaluateTask(taskDetail.id));
-    if (!result) {
-      return;
-    }
-
-    setTaskDetail(result.task);
-    showMessage(
-      result.passed ? "success" : "error",
-      result.passed
-        ? "Judge approved the task and released the fee."
-        : "Judge rejected the task and refunded the client.",
-    );
+    setNodeConfigs(configsFromTopology(template.topology.nodes));
   }
+
+  const runningCount = activeRun?.node_runs.filter((node) => node.status === "running").length ?? 0;
+  const completedCount = activeRun?.node_runs.filter((node) => node.status === "completed").length ?? 0;
+  const totalNodes = activeRun?.node_runs.length ?? template?.topology.nodes.length ?? 0;
 
   return (
-    <main className="page-shell">
-      <section className="hero">
-        <div className="hero-kicker">Escrow-backed agent hiring</div>
-        <h1>Agent Swarm Marketplace</h1>
-        <p>
-          This frontend lets you seed demo users, choose an agent, lock escrow, execute the
-          task, and run an independent evaluation against your FastAPI marketplace backend.
-        </p>
-
-        <div className="hero-grid">
-          <article className="stat-card">
-            <p className="stat-label">Demo client wallet</p>
-            <p className="stat-value">
-              {seedData ? currency(seedData.client.wallet_balance) : "Seed required"}
-            </p>
-          </article>
-          <article className="stat-card">
-            <p className="stat-label">Developer wallet</p>
-            <p className="stat-value">
-              {seedData ? currency(seedData.developer.wallet_balance) : "Seed required"}
-            </p>
-          </article>
-          <article className="stat-card">
-            <p className="stat-label">Published agents</p>
-            <p className="stat-value">{agents.length}</p>
-          </article>
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand-block">
+          <div>
+            <p className="brand-kicker">Parallel DAG Orchestrator</p>
+            <h1>Agent Swarm Control</h1>
+          </div>
         </div>
-      </section>
 
-      <section className="content-grid">
-        <div className="stack">
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Bootstrap demo state</h2>
-                <p>
-                  Seed the client, developer, and starter agents. If the backend already has data,
-                  this safely reuses it.
-                </p>
-              </div>
-              <button className="primary-button" type="button" onClick={handleSeed} disabled={isBusy}>
-                {isBusy ? "Working..." : "Seed marketplace"}
+        <div className="topbar-status">
+          <div className="status-chip">
+            <span className={`status-dot ${health?.llm_mode === "openai" ? "live" : "mock"}`} />
+            LLM: {health?.llm_mode ?? "connecting"}
+          </div>
+          <div className="status-chip">
+            Nodes: {completedCount}/{totalNodes}
+            {runningCount > 1 ? ` | ${runningCount} parallel` : ""}
+          </div>
+          <div className="status-chip">
+            Run: {activeRun ? `#${activeRun.id} ${activeRun.status}` : "idle"}
+          </div>
+        </div>
+      </header>
+
+      {error ? <div className="banner error">{error}</div> : null}
+
+      <main className="workspace">
+        <aside className="sidebar panel">
+          <div className="panel-header">
+            <h2>Launch config</h2>
+            <p>Global context variables injected into node sampling prompts.</p>
+          </div>
+
+          <form className="config-form" onSubmit={handleLaunch}>
+            <label>
+              Template
+              <input value={template?.name ?? ""} readOnly />
+            </label>
+            <label>
+              Product
+              <input value={product} onChange={(event) => setProduct(event.target.value)} required />
+            </label>
+            <label>
+              Target audience
+              <textarea
+                value={targetAudience}
+                onChange={(event) => setTargetAudience(event.target.value)}
+                required
+              />
+            </label>
+            <label>
+              Brand voice
+              <input value={brandVoice} onChange={(event) => setBrandVoice(event.target.value)} required />
+            </label>
+
+            <button className="launch-button" type="submit" disabled={isLaunching || !template || isRunLocked}>
+              {isLaunching ? "Dispatching..." : isRunLocked ? "Run in progress..." : "Launch swarm run"}
+            </button>
+          </form>
+
+          <RunHistory
+            runs={recentRuns}
+            activeRunId={activeRun?.id ?? null}
+            onSelectRun={handleSelectRun}
+            isLoading={isHistoryLoading}
+          />
+        </aside>
+
+        <section className="canvas panel">
+          <div className="panel-header">
+            <h2>Workflow graph</h2>
+            <p>Click a node to configure model, execution mode, and sampling prompt.</p>
+          </div>
+          {template ? (
+            <DagGraph
+              topology={template.topology}
+              nodeStatus={nodeStatus}
+              nodeMeta={nodeMeta}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
+          ) : (
+            <div className="empty-panel">Loading workflow topology...</div>
+          )}
+        </section>
+
+        <aside className="insights">
+          <section className="panel node-panel">
+            <NodeInspector
+              node={selectedTopologyNode}
+              config={selectedConfig}
+              models={models}
+              disabled={isRunLocked}
+              onChange={handleNodeConfigChange}
+            />
+            {!isRunLocked ? (
+              <button className="ghost-button reset-nodes" type="button" onClick={handleResetNodes}>
+                Reset all nodes to template defaults
               </button>
-            </div>
-
-            {message ? (
-              <div className={`message ${message.type}`}>{message.text}</div>
             ) : null}
           </section>
 
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Available agents</h2>
-                <p>Pick one agent to hire for the next task.</p>
-              </div>
-              <button
-                className="secondary-button"
-                type="button"
-                onClick={() => void loadAgents()}
-                disabled={isBusy}
-              >
-                Refresh list
-              </button>
+          <section className="panel output-panel">
+            <div className="panel-header">
+              <h2>Node output</h2>
+              <p>{selectedRunNode?.node_name ?? selectedTopologyNode?.name ?? "Run output"}</p>
             </div>
-
-            {agents.length ? (
-              <div className="agent-list">
-                {agents.map((agent) => (
-                  <button
-                    key={agent.id}
-                    type="button"
-                    className={`agent-card ${selectedAgentId === agent.id ? "selected" : ""}`}
-                    onClick={() => setSelectedAgentId(agent.id)}
-                  >
-                    <div className="agent-card-header">
-                      <div>
-                        <h3>{agent.name}</h3>
-                        <p>{agent.description}</p>
-                      </div>
-                      <span className="price-pill">{currency(agent.execution_fee)}</span>
-                    </div>
-                  </button>
-                ))}
-              </div>
+            {selectedRunNode?.content ? (
+              <pre className="output-block">{selectedRunNode.content}</pre>
             ) : (
-              <div className="empty-state">
-                No agents are loaded yet. Seed the marketplace or start the backend first.
+              <div className="empty-panel">
+                {activeRun
+                  ? "Output appears here when this node completes."
+                  : "Launch a run to see node handoff payloads."}
               </div>
             )}
           </section>
-        </div>
 
-        <div className="stack">
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Create task</h2>
-                <p>
-                  Escrow will lock the selected agent fee as soon as you submit the task.
-                  {selectedAgent ? ` Current fee: ${currency(selectedAgent.execution_fee)}.` : ""}
-                </p>
-              </div>
+          <section className="panel final-panel">
+            <div className="panel-header">
+              <h2>Final deliverable</h2>
+              <p>
+                {activeRun?.final_output_key
+                  ? `Key: ${activeRun.final_output_key}`
+                  : "Downstream copy appears when the workflow completes."}
+              </p>
             </div>
-
-            <form className="field-grid" onSubmit={handleCreateTask}>
-              <div className="field">
-                <label htmlFor="agent">Selected agent</label>
-                <select
-                  id="agent"
-                  value={selectedAgentId ?? ""}
-                  onChange={(event) => setSelectedAgentId(Number(event.target.value))}
-                >
-                  <option value="" disabled>
-                    Choose an agent
-                  </option>
-                  {agents.map((agent) => (
-                    <option key={agent.id} value={agent.id}>
-                      {agent.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="field">
-                <label htmlFor="prompt">Task prompt</label>
-                <textarea
-                  id="prompt"
-                  value={prompt}
-                  onChange={(event) => setPrompt(event.target.value)}
-                />
-              </div>
-
-              <div className="field">
-                <label htmlFor="criteria">Success criteria</label>
-                <textarea
-                  id="criteria"
-                  value={successCriteria}
-                  onChange={(event) => setSuccessCriteria(event.target.value)}
-                />
-              </div>
-
-              <div className="button-row">
-                <button className="primary-button" type="submit" disabled={isBusy}>
-                  {isBusy ? "Submitting..." : "Create task"}
-                </button>
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={() => {
-                    setPrompt(defaultPrompt);
-                    setSuccessCriteria(defaultCriteria);
-                  }}
-                  disabled={isBusy}
-                >
-                  Reset copy
-                </button>
-              </div>
-            </form>
-          </section>
-
-          <section className="panel">
-            <div className="section-heading">
-              <div>
-                <h2>Load task</h2>
-                <p>Fetch any existing task by id and continue its workflow from the UI.</p>
-              </div>
-            </div>
-
-            <div className="field-grid">
-              <div className="field">
-                <label htmlFor="task-id">Task id</label>
-                <input
-                  id="task-id"
-                  value={taskIdInput}
-                  onChange={(event) => setTaskIdInput(event.target.value)}
-                  placeholder="1"
-                />
-              </div>
-
-              <div className="button-row">
-                <button
-                  className="secondary-button"
-                  type="button"
-                  onClick={handleLoadTask}
-                  disabled={isBusy}
-                >
-                  Load task
-                </button>
-              </div>
-            </div>
-          </section>
-
-          <section className="task-card">
-            <div className="section-heading">
-              <div>
-                <h2>Task lifecycle</h2>
-                <p>Execute the hired agent, judge the result, and inspect escrow transactions.</p>
-              </div>
-              {taskDetail ? <span className={statusClass(taskDetail.status)}>{taskDetail.status}</span> : null}
-            </div>
-
-            {taskDetail ? (
-              <>
-                <div className="task-grid">
-                  <div className="task-block">
-                    <strong>Prompt</strong>
-                    <p>{taskDetail.prompt}</p>
-                  </div>
-                  <div className="task-block">
-                    <strong>Success criteria</strong>
-                    <p>{taskDetail.success_criteria}</p>
-                  </div>
-                  <div className="task-block">
-                    <strong>Selected agent</strong>
-                    <p>{taskDetail.agent.name}</p>
-                  </div>
-                  <div className="task-block">
-                    <strong>Escrow remaining</strong>
-                    <p>{currency(taskDetail.escrow_amount)}</p>
-                  </div>
-                </div>
-
-                <div className="task-actions">
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={handleExecuteTask}
-                    disabled={isBusy || taskDetail.status !== "pending"}
-                  >
-                    Execute task
-                  </button>
-                  <button
-                    className="secondary-button"
-                    type="button"
-                    onClick={handleEvaluateTask}
-                    disabled={isBusy || taskDetail.status !== "judging"}
-                  >
-                    Evaluate task
-                  </button>
-                  <button
-                    className="ghost-button"
-                    type="button"
-                    onClick={handleLoadTask}
-                    disabled={isBusy}
-                  >
-                    Refresh task
-                  </button>
-                </div>
-
-                <div className="task-block">
-                  <strong>Agent output</strong>
-                  <p className="task-meta">
-                    {taskDetail.output_text ?? "No output yet. Execute the task to generate work."}
-                  </p>
-                </div>
-
-                <div className="task-block">
-                  <strong>Judge feedback</strong>
-                  <p className="task-meta">
-                    {taskDetail.judge_feedback ?? "No evaluation yet. Evaluate once the task enters judging."}
-                  </p>
-                </div>
-
-                <div>
-                  <strong>Transactions</strong>
-                  <div className="transaction-list" style={{ marginTop: 12 }}>
-                    {taskDetail.transactions.map((transaction) => (
-                      <div className="transaction-item" key={transaction.id}>
-                        <span>{transaction.type}</span>
-                        <span>{currency(transaction.amount)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
+            {activeRun?.final_output_content ? (
+              <pre className="output-block highlight">{activeRun.final_output_content}</pre>
             ) : (
-              <div className="empty-state">
-                Create a task or load one by id to view the full escrow workflow here.
-              </div>
+              <div className="empty-panel">No final output yet.</div>
             )}
           </section>
-        </div>
-      </section>
-    </main>
+
+          <ActivityFeed entries={activity} />
+        </aside>
+      </main>
+    </div>
   );
 }

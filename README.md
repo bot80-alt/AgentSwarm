@@ -1,15 +1,16 @@
-# AI Agent Marketplace
+# AI Agent Swarm
 
-This repo now has both a `backend` FastAPI service and a `frontend` Next.js app for the escrow-based AI agent marketplace demo.
+Parallel DAG multi-agent orchestration with a FastAPI backend and Next.js control console. The `swarm/` package powers async node execution; the backend exposes run APIs; the frontend visualizes the graph and streams live node status.
 
 ## Repo Structure
 
-- `backend/` - FastAPI API, SQLite persistence, AI execution, and judging flow
-- `frontend/` - Next.js UI for seeding demo data, hiring agents, and running the full task lifecycle
+- `swarm/` - Core DAG framework (`graph`, `engine`, `agents`, `workflows`)
+- `backend/` - FastAPI API integrating the swarm engine with SQLite persistence
+- `frontend/` - Next.js orchestration console with live DAG visualization
 
-## Backend
+## Quick start
 
-### Run locally
+### 1. Backend
 
 ```bash
 cd backend
@@ -20,42 +21,53 @@ copy .env.example .env
 uvicorn main:app --reload
 ```
 
-The API will be available at `http://127.0.0.1:8000`.
+API: `http://127.0.0.1:8000`
 
-If `OPENAI_API_KEY` is missing or left as the placeholder value, the backend automatically falls back to mock async execution and mock judging.
+Set `OPENAI_API_KEY` in `.env` for real LLM calls. Without it, nodes run in mock mode with simulated latency (parallel batches still execute concurrently).
 
-### Backend endpoints
-
-- `POST /users/seed`
-- `GET /agents`
-- `POST /tasks`
-- `POST /tasks/{task_id}/execute`
-- `POST /tasks/{task_id}/evaluate`
-- `GET /tasks/{task_id}`
-
-## Frontend
-
-### Run locally
+### 2. Frontend
 
 ```bash
 cd frontend
-copy .env.example .env.local
 npm install
 npm run dev
 ```
 
-The Next.js app will be available at `http://127.0.0.1:3000`.
+UI: `http://127.0.0.1:3000`
 
-Set `NEXT_PUBLIC_API_URL` if your backend is not running on `http://127.0.0.1:8000`.
+Optional: create `frontend/.env.local` with `NEXT_PUBLIC_API_URL=http://127.0.0.1:8000` if the backend uses a different host.
 
-## Workflow
+### 3. CLI (optional)
 
-1. Start the backend.
-2. Start the frontend.
-3. Seed the marketplace from the UI.
-4. Choose an agent, create a task, execute it, and evaluate the result.
+Run the marketing pipeline directly without the UI:
+
+```bash
+pip install -r swarm/requirements.txt
+python -m swarm.main
+```
+
+## Swarm API
+
+- `GET /swarm/health` — engine status and LLM mode
+- `GET /swarm/templates` — available workflow templates with DAG topology
+- `GET /swarm/templates/{template_id}` — single template
+- `POST /swarm/runs` — create and start a workflow run (background execution)
+- `GET /swarm/runs` — recent runs
+- `GET /swarm/runs/{run_id}` — run detail with per-node status and outputs
+
+Legacy marketplace endpoints (`/users/seed`, `/agents`, `/tasks`, etc.) remain available.
+
+## UI workflow
+
+1. Start backend and frontend.
+2. Open the control console — it loads the Marketing Launch Pipeline template.
+3. Configure product, audience, and brand voice.
+4. Click **Launch swarm run** — Market Researcher and Competitor Analyst start in parallel.
+5. Watch the DAG, execution log, and node outputs update live (polls every second).
+6. Inspect the final marketing copy when the Copywriter node completes.
 
 ## Notes
 
-- The SQLite database is stored as `agent_marketplace.db` at the repo root by default.
-- The frontend is designed around the existing escrow flow instead of introducing a separate API layer.
+- Workflow runs are stored in SQLite (`agent_marketplace.db` at repo root by default).
+- The DAG engine schedules nodes as soon as dependencies are satisfied, not only by fixed layers.
+- Windows consoles may not render Unicode symbols in CLI output; the web UI uses ASCII-safe labels.
