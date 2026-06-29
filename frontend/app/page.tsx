@@ -3,6 +3,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ActivityFeed } from "@/components/ActivityFeed";
+import { CompetitionPanel } from "@/components/CompetitionPanel";
 import { DagGraph } from "@/components/DagGraph";
 import { NodeInspector } from "@/components/NodeInspector";
 import { RunHistory } from "@/components/RunHistory";
@@ -41,6 +42,7 @@ function configsFromTopology(nodes: WorkflowNodeTopology[]): Record<string, Edit
         persona: node.persona,
         model: node.model,
         execution_mode: node.execution_mode,
+        tools: [...node.tools],
       },
     ]),
   );
@@ -56,6 +58,7 @@ function configsFromRun(run: WorkflowRun): Record<string, EditableNodeConfig> {
         persona: node.persona,
         model: node.configured_model,
         execution_mode: node.execution_mode,
+        tools: [...node.configured_tools],
       },
     ]),
   );
@@ -143,12 +146,14 @@ export default function HomePage() {
   const [product, setProduct] = useState("");
   const [targetAudience, setTargetAudience] = useState("");
   const [brandVoice, setBrandVoice] = useState("");
+  const [mcpWorkspace, setMcpWorkspace] = useState("");
   const [activeRun, setActiveRun] = useState<WorkflowRun | null>(null);
   const [recentRuns, setRecentRuns] = useState<WorkflowRunSummary[]>([]);
   const [isHistoryLoading, setIsHistoryLoading] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [activeView, setActiveView] = useState<"swarm" | "competitions">("swarm");
   const seenStatusRef = useRef<Record<string, WorkflowNodeStatus>>({});
 
   const isRunLocked = activeRun?.status === "running" || activeRun?.status === "pending";
@@ -195,6 +200,7 @@ export default function HomePage() {
       setProduct(firstTemplate.default_product);
       setTargetAudience(firstTemplate.default_target_audience);
       setBrandVoice(firstTemplate.default_brand_voice);
+      setMcpWorkspace(healthResponse.mcp_workspace ?? "");
       setNodeConfigs(configsFromTopology(firstTemplate.topology.nodes));
       setSelectedNodeId(firstTemplate.topology.nodes[0]?.id ?? null);
     }
@@ -263,10 +269,14 @@ export default function HomePage() {
         product,
         target_audience: targetAudience,
         brand_voice: brandVoice,
+        mcp_workspace: mcpWorkspace.trim() || null,
         nodes: Object.values(nodeConfigs),
       });
       setActiveRun(run);
       setNodeConfigs(configsFromRun(run));
+      if (run.mcp_workspace) {
+        setMcpWorkspace(run.mcp_workspace);
+      }
       setSelectedNodeId(run.node_runs[0]?.node_id ?? null);
       void loadRecentRuns();
     } catch (launchError) {
@@ -282,6 +292,9 @@ export default function HomePage() {
       const run = await api.getRun(runId);
       setActiveRun(run);
       setNodeConfigs(configsFromRun(run));
+      if (run.mcp_workspace) {
+        setMcpWorkspace(run.mcp_workspace);
+      }
       const firstCompleted = run.node_runs.find((node) => node.status === "completed");
       setSelectedNodeId(firstCompleted?.node_id ?? run.node_runs[0]?.node_id ?? null);
     } catch (selectError) {
@@ -311,6 +324,22 @@ export default function HomePage() {
         </div>
 
         <div className="topbar-status">
+          <div className="view-tabs">
+            <button
+              type="button"
+              className={activeView === "swarm" ? "tab active" : "tab"}
+              onClick={() => setActiveView("swarm")}
+            >
+              Swarm runs
+            </button>
+            <button
+              type="button"
+              className={activeView === "competitions" ? "tab active" : "tab"}
+              onClick={() => setActiveView("competitions")}
+            >
+              Competitions
+            </button>
+          </div>
           <div className="status-chip">
             <span className={`status-dot ${health?.llm_mode === "openai" ? "live" : "mock"}`} />
             LLM: {health?.llm_mode ?? "connecting"}
@@ -320,6 +349,9 @@ export default function HomePage() {
             {runningCount > 1 ? ` | ${runningCount} parallel` : ""}
           </div>
           <div className="status-chip">
+            MCP: {health?.mcp_enabled ? health.mcp_workspace ?? "repo root" : "off"}
+          </div>
+          <div className="status-chip">
             Run: {activeRun ? `#${activeRun.id} ${activeRun.status}` : "idle"}
           </div>
         </div>
@@ -327,6 +359,13 @@ export default function HomePage() {
 
       {error ? <div className="banner error">{error}</div> : null}
 
+      {activeView === "competitions" ? (
+        <main className="workspace competition-workspace">
+          <section className="panel competition-shell">
+            <CompetitionPanel />
+          </section>
+        </main>
+      ) : (
       <main className="workspace">
         <aside className="sidebar panel">
           <div className="panel-header">
@@ -354,6 +393,14 @@ export default function HomePage() {
             <label>
               Brand voice
               <input value={brandVoice} onChange={(event) => setBrandVoice(event.target.value)} required />
+            </label>
+            <label>
+              MCP workspace (local files)
+              <input
+                value={mcpWorkspace}
+                onChange={(event) => setMcpWorkspace(event.target.value)}
+                placeholder={health?.mcp_workspace ?? "Repo root (default)"}
+              />
             </label>
 
             <button className="launch-button" type="submit" disabled={isLaunching || !template || isRunLocked}>
@@ -438,6 +485,7 @@ export default function HomePage() {
           <ActivityFeed entries={activity} />
         </aside>
       </main>
+      )}
     </div>
   );
 }

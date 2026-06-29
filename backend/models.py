@@ -70,7 +70,15 @@ class Agent(Base):
     execution_fee: Mapped[float] = mapped_column(Float, nullable=False)
 
     creator: Mapped[User] = relationship("User", back_populates="created_agents")
-    tasks: Mapped[list["Task"]] = relationship("Task", back_populates="agent")
+    tasks: Mapped[list["Task"]] = relationship(
+        "Task",
+        back_populates="agent",
+        foreign_keys="Task.agent_id",
+    )
+    submissions: Mapped[list["TaskSubmission"]] = relationship(
+        "TaskSubmission",
+        back_populates="agent",
+    )
 
 
 class Task(Base):
@@ -78,7 +86,7 @@ class Task(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
-    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
     prompt: Mapped[str] = mapped_column(Text, nullable=False)
     success_criteria: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[TaskStatus] = mapped_column(
@@ -89,19 +97,56 @@ class Task(Base):
     escrow_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     output_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     judge_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    competition_mode: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    bounty_amount: Mapped[float | None] = mapped_column(Float, nullable=True)
+    winner_agent_id: Mapped[int | None] = mapped_column(ForeignKey("agents.id"), nullable=True)
+    casper_account_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    casper_hold_snapshot: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     client: Mapped[User] = relationship(
         "User",
         back_populates="client_tasks",
         foreign_keys=[client_id],
     )
-    agent: Mapped[Agent] = relationship("Agent", back_populates="tasks")
+    agent: Mapped[Agent | None] = relationship(
+        "Agent",
+        back_populates="tasks",
+        foreign_keys=[agent_id],
+    )
+    winner_agent: Mapped[Agent | None] = relationship(
+        "Agent",
+        foreign_keys=[winner_agent_id],
+    )
     transactions: Mapped[list["Transaction"]] = relationship(
         "Transaction",
         back_populates="task",
         cascade="all, delete-orphan",
         order_by="Transaction.id",
     )
+    submissions: Mapped[list["TaskSubmission"]] = relationship(
+        "TaskSubmission",
+        back_populates="task",
+        cascade="all, delete-orphan",
+        order_by="TaskSubmission.id",
+    )
+
+
+class TaskSubmission(Base):
+    __tablename__ = "task_submissions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), nullable=False, index=True)
+    agent_id: Mapped[int] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    output_text: Mapped[str] = mapped_column(Text, nullable=False)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    used_mock: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    submitted_at: Mapped[object] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    task: Mapped[Task] = relationship("Task", back_populates="submissions")
+    agent: Mapped[Agent] = relationship("Agent", back_populates="submissions")
 
 
 class Transaction(Base):
@@ -123,6 +168,7 @@ class WorkflowRun(Base):
     product: Mapped[str] = mapped_column(Text, nullable=False)
     target_audience: Mapped[str] = mapped_column(Text, nullable=False)
     brand_voice: Mapped[str] = mapped_column(Text, nullable=False)
+    mcp_workspace: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[WorkflowRunStatus] = mapped_column(
         SQLEnum(WorkflowRunStatus),
         nullable=False,
@@ -153,6 +199,7 @@ class WorkflowNodeRun(Base):
     task: Mapped[str] = mapped_column(Text, nullable=False, default="")
     persona: Mapped[str] = mapped_column(Text, nullable=False, default="")
     configured_model: Mapped[str] = mapped_column(Text, nullable=False, default="gpt-4o-mini")
+    configured_tools: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     execution_mode: Mapped[str] = mapped_column(Text, nullable=False, default="parallel")
     status: Mapped[WorkflowNodeStatus] = mapped_column(
         SQLEnum(WorkflowNodeStatus),

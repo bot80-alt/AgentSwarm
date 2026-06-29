@@ -11,9 +11,20 @@ from dotenv import load_dotenv
 from openai import APIError, AsyncOpenAI, OpenAIError
 from pydantic import BaseModel, Field
 
+from swarm.mcp.cspr_client import AGENT_CASPER_TOOL_WHITELIST
+from swarm.mcp.registry import (
+    CSPR_GROUP,
+    FILESYSTEM_GROUP,
+    FILESYSTEM_TOOL_NAMES,
+    CompositeMCPToolRegistry,
+    registry_for_tools,
+    resolve_enabled_tools,
+)
+
 load_dotenv()
 
 PLACEHOLDER_KEYS = {"", "your_openai_api_key_here", "sk-placeholder"}
+MAX_TOOL_ROUNDS = 8
 
 
 class AgentContext(BaseModel):
@@ -27,6 +38,7 @@ class AgentContext(BaseModel):
     upstream_outputs: dict[str, Any] = Field(default_factory=dict)
     global_context: dict[str, Any] = Field(default_factory=dict)
     model: str | None = None
+    mcp_workspace: str | None = None
 
 
 class NodeResult(BaseModel):
@@ -86,17 +98,23 @@ class BaseLLMAgent:
     ) -> NodeResult:
         prompt = self._build_prompt(context)
         resolved_model = model or context.model or self.model
+        enabled_tools = resolve_enabled_tools(context.tools)
         used_mock = self._client is None
 
+        tool_calls_made: list[dict[str, Any]] = []
         if used_mock:
-            content, structured = await self._mock_complete(context, prompt)
+            content, structured = await self._mock_complete(context, prompt, enabled_tools)
             model_name = "mock"
         else:
-            content, structured, model_name = await self._llm_complete(
+            content, structured, model_name, tool_calls_made = await self._llm_complete(
                 context,
                 prompt,
                 model=resolved_model,
+                enabled_tools=enabled_tools,
             )
+
+        if tool_calls_made:
+            structured["mcp_tool_calls"] = tool_calls_made
 
         return NodeResult(
             node_id=context.node_id,
@@ -111,7 +129,25 @@ class BaseLLMAgent:
     def _build_prompt(self, context: AgentContext) -> str:
         upstream_text = _format_upstream_context(context.upstream_outputs)
         global_text = json.dumps(context.global_context, indent=2) if context.global_context else "{}"
-        tools_text = ", ".join(context.tools) if context.tools else "none"
+        enabled_tools = resolve_enabled_tools(context.tools)
+        if enabled_tools:
+            fs_tools = sorted(t for t in enabled_tools if t not in AGENT_CASPER_TOOL_WHITELIST)
+            cspr_tools = sorted(t for t in enabled_tools if t in AGENT_CASPER_TOOL_WHITELIST)
+            parts: list[str] = []
+            if fs_tools:
+                parts.append(f"filesystem ({', '.join(fs_tools)})")
+            if cspr_tools:
+                parts.append(f"casper ({', '.join(cspr_tools)})")
+            tools_text = (
+                "MCP tools enabled: "
+                + "; ".join(parts)
+                + ". Use filesystem tools for local files; casper tools for on-chain data."
+            )
+            workspace = context.mcp_workspace or context.global_context.get("mcp_workspace")
+            if workspace:
+                tools_text += f" Workspace root: {workspace}"
+        else:
+            tools_text = ", ".join(context.tools) if context.tools else "none"
 
         return (
             f"Global context:\n{global_text}\n\n"
@@ -127,9 +163,18 @@ class BaseLLMAgent:
         user_prompt: str,
         *,
         model: str,
-    ) -> tuple[str, dict[str, Any], str]:
+        enabled_tools: set[str],
+    ) -> tuple[str, dict[str, Any], str, list[dict[str, Any]]]:
         assert self._client is not None
         try:
+            if enabled_tools:
+                return await self._llm_with_tools(
+                    context,
+                    user_prompt,
+                    model=model,
+                    enabled_tools=enabled_tools,
+                )
+
             response = await self._client.chat.completions.create(
                 model=model,
                 temperature=self.temperature,
@@ -145,15 +190,81 @@ class BaseLLMAgent:
                 "summary": content[:280] + ("..." if len(content) > 280 else ""),
                 "word_count": len(content.split()),
             }
-            return content, structured, model
+            return content, structured, model, []
         except (OpenAIError, APIError, ValueError):
-            content, structured = await self._mock_complete(context, user_prompt)
-            return content, structured, "mock-fallback"
+            content, structured = await self._mock_complete(context, user_prompt, enabled_tools)
+            return content, structured, "mock-fallback", []
+
+    async def _llm_with_tools(
+        self,
+        context: AgentContext,
+        user_prompt: str,
+        *,
+        model: str,
+        enabled_tools: set[str],
+    ) -> tuple[str, dict[str, Any], str, list[dict[str, Any]]]:
+        workspace = context.mcp_workspace or context.global_context.get("mcp_workspace")
+        registry = registry_for_tools(workspace, enabled_tools)
+        if isinstance(registry, CompositeMCPToolRegistry):
+            await registry.hydrate_casper_tools()
+        openai_tools = registry.openai_tools(enabled_tools)
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": context.persona},
+            {"role": "user", "content": user_prompt},
+        ]
+        tool_calls_made: list[dict[str, Any]] = []
+
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = await self._client.chat.completions.create(  # type: ignore[union-attr]
+                model=model,
+                temperature=self.temperature,
+                messages=messages,
+                tools=openai_tools,
+                tool_choice="auto",
+            )
+            message = response.choices[0].message
+            if not message.tool_calls:
+                content = (message.content or "").strip()
+                if not content:
+                    raise ValueError("LLM returned empty content after tool loop.")
+                structured = {
+                    "summary": content[:280] + ("..." if len(content) > 280 else ""),
+                    "word_count": len(content.split()),
+                    "mcp_workspace": registry.workspace_root,
+                    "mcp_tools_used": len(tool_calls_made),
+                }
+                return content, structured, model, tool_calls_made
+
+            messages.append(message.model_dump(exclude_none=True))
+            for tool_call in message.tool_calls:
+                fn = tool_call.function
+                try:
+                    args = json.loads(fn.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = await registry.execute(fn.name, args)
+                tool_calls_made.append(
+                    {
+                        "tool": fn.name,
+                        "arguments": args,
+                        "result_preview": result[:500],
+                    }
+                )
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": result,
+                    }
+                )
+
+        raise ValueError(f"Exceeded maximum MCP tool rounds ({MAX_TOOL_ROUNDS}).")
 
     async def _mock_complete(
         self,
         context: AgentContext,
         user_prompt: str,
+        enabled_tools: set[str],
     ) -> tuple[str, dict[str, Any]]:
         await asyncio.sleep(self.mock_delay_seconds)
         upstream_names = list(context.upstream_outputs.keys())
@@ -162,6 +273,17 @@ class BaseLLMAgent:
             if upstream_names
             else " Executed as an independent root node."
         )
+        mcp_note = ""
+        if enabled_tools:
+            groups: list[str] = []
+            if enabled_tools & set(FILESYSTEM_TOOL_NAMES):
+                groups.append(FILESYSTEM_GROUP)
+            if enabled_tools & AGENT_CASPER_TOOL_WHITELIST:
+                groups.append(CSPR_GROUP)
+            mcp_note = (
+                f"\n\n[MCP mock] Would have used tool groups: "
+                f"{', '.join(groups) or ', '.join(sorted(enabled_tools))}."
+            )
         content = (
             f"[{context.node_name}] Mock LLM output for task: {context.task.strip()}"
             f"{upstream_note}\n\n"
@@ -169,10 +291,12 @@ class BaseLLMAgent:
             f"- Persona-driven analysis from {context.node_name}.\n"
             f"- Actionable bullet points aligned to the task brief.\n"
             f"- Ready for handoff to downstream nodes."
+            f"{mcp_note}"
         )
         structured = {
             "summary": content[:280],
             "word_count": len(content.split()),
             "upstream_sources": upstream_names,
+            "mcp_tools_enabled": sorted(enabled_tools),
         }
         return content, structured

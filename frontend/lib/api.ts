@@ -1,5 +1,12 @@
 import type {
+  Agent,
+  Competition,
+  CompetitionCreateInput,
+  CompetitionEvaluateResult,
+  CSPRStatus,
+  MCPStatus,
   ModelOption,
+  SeedResponse,
   SwarmHealth,
   WorkflowRun,
   WorkflowRunCreateInput,
@@ -41,6 +48,12 @@ async function request<T>(path: string, init?: RequestInitWithBody): Promise<T> 
 
 export const api = {
   swarmHealth: () => request<SwarmHealth>("/swarm/health"),
+  mcpStatus: (workspace?: string) =>
+    request<MCPStatus>(
+      workspace
+        ? `/swarm/mcp/status?workspace=${encodeURIComponent(workspace)}`
+        : "/swarm/mcp/status",
+    ),
   listModels: () => request<ModelOption[]>("/swarm/models"),
   listTemplates: () => request<WorkflowTemplate[]>("/swarm/templates"),
   getTemplate: (templateId: string) => request<WorkflowTemplate>(`/swarm/templates/${templateId}`),
@@ -51,4 +64,24 @@ export const api = {
     }),
   listRuns: () => request<WorkflowRunSummary[]>("/swarm/runs"),
   getRun: (runId: number) => request<WorkflowRun>(`/swarm/runs/${runId}`),
+  csprStatus: () => request<CSPRStatus>("/swarm/mcp/casper/status"),
+  seedUsers: () =>
+    request<SeedResponse>("/users/seed", {
+      method: "POST",
+    }),
+  listAgents: () => request<Agent[]>("/agents"),
+  createCompetition: (payload: CompetitionCreateInput) =>
+    request<Competition>("/competitions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getCompetition: (taskId: number) => request<Competition>(`/competitions/${taskId}`),
+  startCompetition: (taskId: number) =>
+    request<Competition>(`/competitions/${taskId}/compete`, {
+      method: "POST",
+    }),
+  evaluateCompetition: (taskId: number) =>
+    request<CompetitionEvaluateResult>(`/competitions/${taskId}/evaluate`, {
+      method: "POST",
+    }),
 };

@@ -8,6 +8,7 @@ from swarm.graph import Node, WorkflowGraph
 from swarm.models_catalog import DEFAULT_MODEL
 
 MARKETING_LAUNCH_TEMPLATE_ID = "marketing_launch"
+DEVELOPER_COMPETITION_TEMPLATE_ID = "developer_competition"
 
 
 def _marketing_node_defs() -> list[dict[str, Any]]:
@@ -26,7 +27,7 @@ def _marketing_node_defs() -> list[dict[str, Any]]:
             "dependencies": [],
             "input_keys": [],
             "output_key": "market_research",
-            "tools": ["web_search", "trend_analysis"],
+            "tools": ["filesystem", "web_search", "trend_analysis"],
             "model": DEFAULT_MODEL,
             "execution_mode": "parallel",
         },
@@ -118,7 +119,7 @@ def apply_node_overrides(graph: WorkflowGraph, overrides: list[dict[str, Any]]) 
             node.model_copy(
                 update={
                     key: patch[key]
-                    for key in ("task", "persona", "model", "execution_mode")
+                    for key in ("task", "persona", "model", "execution_mode", "tools")
                     if key in patch and patch[key] is not None
                 }
             )
@@ -176,12 +177,98 @@ def graph_topology(graph: WorkflowGraph) -> dict[str, Any]:
     }
 
 
+def _developer_competition_node_defs() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": "proposal_writer",
+            "name": "Proposal Writer",
+            "persona": (
+                "You are a senior proposal writer. Produce structured, persuasive deliverables "
+                "for client RFPs."
+            ),
+            "task": (
+                "Solve the client task for '{product}'. Deliverable must satisfy: "
+                "{success_criteria}"
+            ),
+            "dependencies": [],
+            "input_keys": [],
+            "output_key": "proposal_writer_output",
+            "tools": ["casper"],
+            "model": DEFAULT_MODEL,
+            "execution_mode": "parallel",
+        },
+        {
+            "id": "support_triage",
+            "name": "Support Triage Specialist",
+            "persona": (
+                "You are a support triage specialist who turns messy requests into clear, "
+                "actionable solutions."
+            ),
+            "task": (
+                "Solve the client task for '{product}'. Deliverable must satisfy: "
+                "{success_criteria}"
+            ),
+            "dependencies": [],
+            "input_keys": [],
+            "output_key": "support_triage_output",
+            "tools": ["casper"],
+            "model": DEFAULT_MODEL,
+            "execution_mode": "parallel",
+        },
+        {
+            "id": "competition_judge",
+            "name": "Competition Judge",
+            "persona": (
+                "You are an impartial judge for a developer agent competition. Compare submissions "
+                "and pick the best answer against the success criteria."
+            ),
+            "task": (
+                "Review all competing agent outputs and select the winning submission for "
+                "'{product}'. Criteria: {success_criteria}"
+            ),
+            "dependencies": ["proposal_writer", "support_triage"],
+            "input_keys": ["proposal_writer_output", "support_triage_output"],
+            "output_key": "competition_winner",
+            "tools": [],
+            "model": DEFAULT_MODEL,
+            "execution_mode": "serial",
+        },
+    ]
+
+
+def build_developer_competition_workflow(
+    *,
+    product: str,
+    success_criteria: str,
+    node_overrides: list[dict[str, Any]] | None = None,
+) -> WorkflowGraph:
+    context = {
+        "product": product,
+        "success_criteria": success_criteria,
+        "target_audience": "competition entrants",
+        "brand_voice": "professional",
+    }
+    graph = WorkflowGraph(name="developer_competition")
+    for defn in _developer_competition_node_defs():
+        graph.add_node(_build_node(defn, context))
+
+    if node_overrides:
+        graph = apply_node_overrides(graph, node_overrides)
+    graph.validate()
+    return graph
+
+
 def list_templates() -> list[dict[str, Any]]:
     sample = build_marketing_workflow(
         product="Your Product",
         target_audience="your target audience",
     )
     topology = graph_topology(sample)
+    competition_sample = build_developer_competition_workflow(
+        product="Client RFP task",
+        success_criteria="Clear, actionable deliverable with acceptance criteria met",
+    )
+    competition_topology = graph_topology(competition_sample)
     return [
         {
             "id": MARKETING_LAUNCH_TEMPLATE_ID,
@@ -195,7 +282,20 @@ def list_templates() -> list[dict[str, Any]]:
             "default_brand_voice": "optimistic, science-backed, eco-conscious",
             "final_output_key": "marketing_copy",
             "topology": topology,
-        }
+        },
+        {
+            "id": DEVELOPER_COMPETITION_TEMPLATE_ID,
+            "name": "Developer Agent Competition",
+            "description": (
+                "Parallel developer agents compete on the same task; a judge node picks "
+                "the winning submission."
+            ),
+            "default_product": "Build a REST API health-check endpoint",
+            "default_target_audience": "competition entrants",
+            "default_brand_voice": "professional, precise",
+            "final_output_key": "competition_winner",
+            "topology": competition_topology,
+        },
     ]
 
 
@@ -218,6 +318,19 @@ def resolve_template(
             "product": product,
             "target_audience": target_audience,
             "brand_voice": brand_voice,
+        }
+        return graph, context
+    if template_id == DEVELOPER_COMPETITION_TEMPLATE_ID:
+        graph = build_developer_competition_workflow(
+            product=product,
+            success_criteria=brand_voice,
+            node_overrides=node_overrides,
+        )
+        context = {
+            "product": product,
+            "target_audience": target_audience,
+            "brand_voice": brand_voice,
+            "success_criteria": brand_voice,
         }
         return graph, context
     raise ValueError(f"Unknown workflow template: {template_id!r}")

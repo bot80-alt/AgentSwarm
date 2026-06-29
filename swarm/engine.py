@@ -240,6 +240,7 @@ class WorkflowEngine:
             upstream_outputs=upstream,
             global_context=global_context,
             model=node.model,
+            mcp_workspace=global_context.get("mcp_workspace"),
         )
         return await self.agent.run(context, output_key=node.output_key, model=node.model)
 

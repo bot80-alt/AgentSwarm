@@ -1,8 +1,9 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from models import TaskStatus, TransactionType, UserRole, WorkflowNodeStatus, WorkflowRunStatus
+from mcp_service import deserialize_tools
 
 
 class UserBase(BaseModel):
@@ -49,20 +50,76 @@ class TaskCreate(BaseModel):
 class TaskRead(BaseModel):
     id: int
     client_id: int
-    agent_id: int
+    agent_id: int | None
     prompt: str
     success_criteria: str
     status: TaskStatus
     escrow_amount: float
     output_text: str | None
     judge_feedback: str | None
+    competition_mode: bool = False
+    bounty_amount: float | None = None
+    winner_agent_id: int | None = None
+    casper_account_hash: str | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
 
+class SubmissionRead(BaseModel):
+    id: int
+    task_id: int
+    agent_id: int
+    output_text: str
+    score: float | None
+    used_mock: bool
+    submitted_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompetitionCreate(BaseModel):
+    client_id: int
+    prompt: str = Field(min_length=1)
+    success_criteria: str = Field(min_length=1)
+    bounty_amount: float = Field(gt=0)
+    casper_account_hash: str | None = None
+    agent_ids: list[int] | None = None
+
+
+class CompetitionRead(TaskRead):
+    casper_hold_snapshot: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompetitionDetail(CompetitionRead):
+    client: UserRead
+    submissions: list[SubmissionRead]
+    transactions: list[TransactionRead]
+    winner_agent: AgentRead | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CompetitionEvaluateResponse(BaseModel):
+    winner_agent_id: int
+    reasoning: str
+    scores: dict[int, float]
+    task: CompetitionDetail
+
+
+class CSPRStatusRead(BaseModel):
+    enabled: bool
+    url: str
+    network: str
+    connected: bool
+    tool_count: int
+    error: str | None = None
+
+
 class TaskDetail(TaskRead):
     client: UserRead
-    agent: AgentRead
+    agent: AgentRead | None
     transactions: list[TransactionRead]
 
     model_config = ConfigDict(from_attributes=True)
@@ -104,6 +161,7 @@ class NodeConfigInput(BaseModel):
     persona: str = Field(min_length=1)
     model: str = Field(min_length=1)
     execution_mode: str = Field(pattern="^(parallel|serial)$")
+    tools: list[str] = Field(default_factory=list)
 
 
 class ModelOptionRead(BaseModel):
@@ -117,6 +175,7 @@ class WorkflowRunCreate(BaseModel):
     product: str = Field(min_length=1)
     target_audience: str = Field(min_length=1)
     brand_voice: str = Field(min_length=1)
+    mcp_workspace: str | None = None
     nodes: list[NodeConfigInput] = Field(default_factory=list)
 
 
@@ -155,6 +214,7 @@ class WorkflowNodeRunRead(BaseModel):
     task: str
     persona: str
     configured_model: str
+    configured_tools: list[str] = Field(default_factory=list)
     execution_mode: str
     status: WorkflowNodeStatus
     content: str | None
@@ -165,6 +225,33 @@ class WorkflowNodeRunRead(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _hydrate_tools(cls, value: object) -> object:
+        if isinstance(value, dict):
+            raw = value.get("configured_tools", "[]")
+            if isinstance(raw, str):
+                value = {**value, "configured_tools": deserialize_tools(raw)}
+            return value
+        raw = getattr(value, "configured_tools", "[]")
+        return {
+            "id": value.id,
+            "node_id": value.node_id,
+            "node_name": value.node_name,
+            "output_key": value.output_key,
+            "task": value.task,
+            "persona": value.persona,
+            "configured_model": value.configured_model,
+            "configured_tools": deserialize_tools(raw),
+            "execution_mode": value.execution_mode,
+            "status": value.status,
+            "content": value.content,
+            "model": value.model,
+            "used_mock": value.used_mock,
+            "started_at": value.started_at,
+            "finished_at": value.finished_at,
+        }
+
 
 class WorkflowRunRead(BaseModel):
     id: int
@@ -172,6 +259,7 @@ class WorkflowRunRead(BaseModel):
     product: str
     target_audience: str
     brand_voice: str
+    mcp_workspace: str | None
     status: WorkflowRunStatus
     elapsed_seconds: float | None
     final_output_key: str | None
@@ -198,3 +286,19 @@ class SwarmHealthRead(BaseModel):
     message: str
     templates: list[str]
     llm_mode: str
+    mcp_enabled: bool = True
+    mcp_workspace: str | None = None
+
+
+class MCPToolRead(BaseModel):
+    name: str
+    description: str
+    group: str
+
+
+class MCPStatusRead(BaseModel):
+    enabled: bool
+    workspace_root: str | None
+    tool_groups: list[str]
+    tools: list[MCPToolRead]
+    error: str | None = None

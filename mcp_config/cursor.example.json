@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "agent-swarm-filesystem": {
+      "command": "python",
+      "args": ["-m", "swarm.mcp.server"],
+      "env": {
+        "MCP_WORKSPACE_ROOT": "E:/path/to/your/project"
+      }
+    },
+    "cspr_cloud_testnet": {
+      "url": "https://mcp.testnet.cspr.cloud/mcp",
+      "headers": {
+        "X-CSPR-Cloud-Api-Key": "${CSPR_CLOUD_API_KEY}"
+      }
+    }
+  }
+}

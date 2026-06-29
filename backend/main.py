@@ -7,18 +7,32 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session, joinedload
 
 from ai_service import evaluate_task, execute_agent_task
+from competition_service import (
+    create_competition,
+    evaluate_competition,
+    get_competition,
+    run_competition,
+)
+from cspr_service import get_cspr_status_async
 from database import Base, SessionLocal, engine, migrate_schema
 from models import Agent, Task, TaskStatus, Transaction, TransactionType, User, UserRole
 from schemas import (
     AgentRead,
+    CompetitionCreate,
+    CompetitionDetail,
+    CompetitionEvaluateResponse,
+    CompetitionRead,
+    CSPRStatusRead,
     EvaluationResponse,
     ExecutionResponse,
+    MCPStatusRead,
+    MCPToolRead,
+    ModelOptionRead,
     SeedResponse,
     SwarmHealthRead,
     TaskCreate,
     TaskDetail,
     TaskRead,
-    ModelOptionRead,
     WorkflowRunCreate,
     WorkflowRunRead,
     WorkflowRunSummary,
@@ -32,6 +46,7 @@ from swarm_service import (
     get_workflow_run,
     list_workflow_runs,
     llm_mode,
+    mcp_status,
 )
 
 
@@ -104,11 +119,31 @@ def healthcheck() -> dict[str, str]:
 @app.get("/swarm/health", response_model=SwarmHealthRead)
 def swarm_health() -> SwarmHealthRead:
     templates = get_templates()
+    status = mcp_status()
     return SwarmHealthRead(
         message="Swarm engine is ready.",
         templates=[template["id"] for template in templates],
         llm_mode=llm_mode(),
+        mcp_enabled=status["enabled"],
+        mcp_workspace=status.get("workspace_root"),
     )
+
+
+@app.get("/swarm/mcp/status", response_model=MCPStatusRead)
+def swarm_mcp_status(workspace: str | None = None) -> MCPStatusRead:
+    return MCPStatusRead.model_validate(mcp_status(workspace))
+
+
+@app.get("/swarm/mcp/casper/status", response_model=CSPRStatusRead)
+async def swarm_cspr_status() -> CSPRStatusRead:
+    status = await get_cspr_status_async()
+    return CSPRStatusRead.model_validate(status)
+
+
+@app.get("/swarm/mcp/tools", response_model=list[MCPToolRead])
+def swarm_mcp_tools() -> list[MCPToolRead]:
+    status = mcp_status()
+    return [MCPToolRead.model_validate(tool) for tool in status["tools"]]
 
 
 @app.get("/swarm/models", response_model=list[ModelOptionRead])
@@ -143,6 +178,7 @@ async def start_swarm_run(
                 "product": payload.product,
                 "target_audience": payload.target_audience,
                 "brand_voice": payload.brand_voice,
+                "mcp_workspace": payload.mcp_workspace,
                 "nodes": [node.model_dump() for node in payload.nodes],
             },
         )
@@ -266,6 +302,12 @@ def create_task(payload: TaskCreate, db: Session = Depends(get_db)):
 async def execute_task_endpoint(task_id: int, db: Session = Depends(get_db)):
     task = _get_task_or_404(db, task_id)
 
+    if task.competition_mode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use /competitions endpoints for competition tasks.",
+        )
+
     if task.status != TaskStatus.PENDING:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -276,7 +318,7 @@ async def execute_task_endpoint(task_id: int, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(task)
 
-    output_text = await execute_agent_task(task.prompt, task.success_criteria)
+    output_text, _used_mock = await execute_agent_task(task.prompt, task.success_criteria)
 
     task.output_text = output_text
     task.status = TaskStatus.JUDGING
@@ -303,6 +345,18 @@ async def evaluate_existing_task(task_id: int, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Task output is empty; execute the task before evaluating it.",
+        )
+
+    if task.competition_mode:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use /competitions endpoints for competition tasks.",
+        )
+
+    if task.agent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Task has no assigned agent.",
         )
 
     result = await evaluate_task(task.prompt, task.success_criteria, task.output_text)
@@ -352,3 +406,61 @@ async def evaluate_existing_task(task_id: int, db: Session = Depends(get_db)):
 @app.get("/tasks/{task_id}", response_model=TaskDetail)
 def get_task(task_id: int, db: Session = Depends(get_db)):
     return _get_task_or_404(db, task_id)
+
+
+@app.post("/competitions", response_model=CompetitionRead, status_code=status.HTTP_201_CREATED)
+async def create_competition_endpoint(
+    payload: CompetitionCreate,
+    db: Session = Depends(get_db),
+):
+    task = await create_competition(db, payload)
+    return task
+
+
+@app.post("/competitions/{task_id}/compete", response_model=CompetitionRead)
+async def compete_endpoint(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    task = get_competition(db, task_id)
+
+    if task.status != TaskStatus.PENDING:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only pending competitions can be started.",
+        )
+
+    task.status = TaskStatus.EXECUTING
+    db.commit()
+    db.refresh(task)
+
+    background_tasks.add_task(_run_competition_background, task_id, SessionLocal)
+    return task
+
+
+async def _run_competition_background(task_id: int, session_factory) -> None:
+    db = session_factory()
+    try:
+        task = db.get(Task, task_id)
+        if task is None or task.status != TaskStatus.EXECUTING:
+            return
+        await run_competition(db, task_id)
+    except Exception:
+        task = db.get(Task, task_id)
+        if task is not None:
+            task.status = TaskStatus.FAILED
+            db.commit()
+    finally:
+        db.close()
+
+
+@app.post("/competitions/{task_id}/evaluate", response_model=CompetitionEvaluateResponse)
+async def evaluate_competition_endpoint(task_id: int, db: Session = Depends(get_db)):
+    result = await evaluate_competition(db, task_id)
+    return CompetitionEvaluateResponse.model_validate(result)
+
+
+@app.get("/competitions/{task_id}", response_model=CompetitionDetail)
+def get_competition_endpoint(task_id: int, db: Session = Depends(get_db)):
+    return get_competition(db, task_id)

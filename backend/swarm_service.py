@@ -9,12 +9,17 @@ import path_setup  # noqa: F401
 from sqlalchemy.orm import Session, joinedload
 
 from models import WorkflowNodeRun, WorkflowNodeStatus, WorkflowRun, WorkflowRunStatus
+from mcp_service import deserialize_tools, get_mcp_status, serialize_tools
 from swarm.engine import WorkflowEngine, WorkflowEvent
 from swarm.models_catalog import AVAILABLE_MODELS
 from swarm.workflows import list_templates, resolve_template
 
 
 PLACEHOLDER_KEYS = {"", "your_openai_api_key_here", "sk-placeholder"}
+
+
+def mcp_status(workspace: str | None = None) -> dict[str, Any]:
+    return get_mcp_status(workspace)
 
 
 def llm_mode() -> str:
@@ -32,7 +37,7 @@ def get_templates() -> list[dict[str, Any]]:
     return list_templates()
 
 
-def _node_overrides_from_payload(nodes: list[dict[str, str]]) -> list[dict[str, Any]]:
+def _node_overrides_from_payload(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "node_id": node["node_id"],
@@ -40,6 +45,7 @@ def _node_overrides_from_payload(nodes: list[dict[str, str]]) -> list[dict[str, 
             "persona": node["persona"],
             "model": node["model"],
             "execution_mode": node["execution_mode"],
+            "tools": node.get("tools") or [],
         }
         for node in nodes
     ]
@@ -73,6 +79,7 @@ def create_workflow_run(db: Session, payload: dict[str, Any]) -> WorkflowRun:
         product=payload["product"],
         target_audience=payload["target_audience"],
         brand_voice=payload["brand_voice"],
+        mcp_workspace=payload.get("mcp_workspace"),
         status=WorkflowRunStatus.PENDING,
     )
     db.add(run)
@@ -88,6 +95,7 @@ def create_workflow_run(db: Session, payload: dict[str, Any]) -> WorkflowRun:
                 task=node.task,
                 persona=node.persona,
                 configured_model=node.model or "gpt-4o-mini",
+                configured_tools=serialize_tools(node.tools),
                 execution_mode=node.execution_mode,
                 status=WorkflowNodeStatus.PENDING,
             )
@@ -112,6 +120,7 @@ async def execute_workflow_run(run_id: int, db_factory) -> None:
                 "persona": node_run.persona,
                 "model": node_run.configured_model,
                 "execution_mode": node_run.execution_mode,
+                "tools": deserialize_tools(node_run.configured_tools),
             }
             for node_run in run.node_runs
         ]
@@ -123,6 +132,8 @@ async def execute_workflow_run(run_id: int, db_factory) -> None:
             brand_voice=run.brand_voice,
             node_overrides=stored_overrides,
         )
+        if run.mcp_workspace:
+            context["mcp_workspace"] = run.mcp_workspace
 
         async def on_event(event: WorkflowEvent) -> None:
             session = db_factory()

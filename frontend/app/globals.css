@@ -619,3 +619,103 @@ button {
     align-items: flex-start;
   }
 }
+
+.view-tabs {
+  display: flex;
+  gap: 8px;
+  margin-right: 12px;
+}
+
+.view-tabs .tab {
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-muted);
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.view-tabs .tab.active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.competition-workspace {
+  grid-template-columns: 1fr;
+}
+
+.competition-shell {
+  padding: 20px;
+}
+
+.competition-panel .badge-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.competition-panel .badge {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.competition-panel .badge-ok {
+  color: var(--success);
+}
+
+.competition-panel .badge-warn {
+  color: #fbbf24;
+}
+
+.competition-form {
+  display: grid;
+  gap: 12px;
+  margin: 16px 0;
+}
+
+.competition-form label {
+  display: grid;
+  gap: 6px;
+}
+
+.competition-buttons {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.submissions-list {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.submission {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.submission.winner {
+  border-color: var(--success);
+}
+
+.submission pre {
+  white-space: pre-wrap;
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.winner-tag {
+  margin-left: 8px;
+  color: var(--success);
+  font-weight: 600;
+}
+
+.error-banner {
+  color: var(--danger);
+  margin: 8px 0;
+}

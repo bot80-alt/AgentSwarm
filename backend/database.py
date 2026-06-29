@@ -40,28 +40,135 @@ Base = declarative_base()
 
 
 def migrate_schema() -> None:
-    """Add swarm node config columns to existing SQLite databases."""
-    if not DATABASE_URL.startswith("sqlite"):
-        return
-
+    """Add columns/tables to existing databases (SQLite and PostgreSQL)."""
     from sqlalchemy import inspect, text
 
     inspector = inspect(engine)
-    if "workflow_node_runs" not in inspector.get_table_names():
-        return
+    table_names = inspector.get_table_names()
+    dialect = engine.dialect.name
 
-    existing = {column["name"] for column in inspector.get_columns("workflow_node_runs")}
-    additions = {
-        "task": "TEXT NOT NULL DEFAULT ''",
-        "persona": "TEXT NOT NULL DEFAULT ''",
-        "configured_model": "TEXT NOT NULL DEFAULT 'gpt-4o-mini'",
-        "execution_mode": "TEXT NOT NULL DEFAULT 'parallel'",
-    }
+    if "workflow_node_runs" in table_names:
+        existing = {column["name"] for column in inspector.get_columns("workflow_node_runs")}
+        additions = {
+            "task": "TEXT NOT NULL DEFAULT ''",
+            "persona": "TEXT NOT NULL DEFAULT ''",
+            "configured_model": "TEXT NOT NULL DEFAULT 'gpt-4o-mini'",
+            "execution_mode": "TEXT NOT NULL DEFAULT 'parallel'",
+        }
 
-    with engine.begin() as connection:
-        for column_name, ddl in additions.items():
-            if column_name not in existing:
+        with engine.begin() as connection:
+            for column_name, ddl in additions.items():
+                if column_name not in existing:
+                    connection.execute(
+                        text(f"ALTER TABLE workflow_node_runs ADD COLUMN {column_name} {ddl}")
+                    )
+
+        existing = {column["name"] for column in inspector.get_columns("workflow_node_runs")}
+        if "configured_tools" not in existing:
+            with engine.begin() as connection:
                 connection.execute(
-                    text(f"ALTER TABLE workflow_node_runs ADD COLUMN {column_name} {ddl}")
+                    text(
+                        "ALTER TABLE workflow_node_runs ADD COLUMN configured_tools "
+                        "TEXT NOT NULL DEFAULT '[]'"
+                    )
+                )
+
+    if "workflow_runs" in table_names:
+        run_columns = {column["name"] for column in inspector.get_columns("workflow_runs")}
+        if "mcp_workspace" not in run_columns:
+            with engine.begin() as connection:
+                connection.execute(
+                    text("ALTER TABLE workflow_runs ADD COLUMN mcp_workspace TEXT")
+                )
+
+    if "tasks" in table_names:
+        task_columns = {column["name"] for column in inspector.get_columns("tasks")}
+        if dialect == "postgresql":
+            task_additions = {
+                "competition_mode": "BOOLEAN NOT NULL DEFAULT FALSE",
+                "bounty_amount": "DOUBLE PRECISION",
+                "winner_agent_id": "INTEGER",
+                "casper_account_hash": "TEXT",
+                "casper_hold_snapshot": "TEXT",
+            }
+            with engine.begin() as connection:
+                for column_name, ddl in task_additions.items():
+                    if column_name not in task_columns:
+                        connection.execute(
+                            text(
+                                f"ALTER TABLE tasks ADD COLUMN IF NOT EXISTS "
+                                f"{column_name} {ddl}"
+                            )
+                        )
+                agent_col = next(
+                    (col for col in inspector.get_columns("tasks") if col["name"] == "agent_id"),
+                    None,
+                )
+                if agent_col and not agent_col.get("nullable", True):
+                    connection.execute(
+                        text("ALTER TABLE tasks ALTER COLUMN agent_id DROP NOT NULL")
+                    )
+        else:
+            task_additions = {
+                "competition_mode": "BOOLEAN NOT NULL DEFAULT 0",
+                "bounty_amount": "FLOAT",
+                "winner_agent_id": "INTEGER",
+                "casper_account_hash": "TEXT",
+                "casper_hold_snapshot": "TEXT",
+            }
+            with engine.begin() as connection:
+                for column_name, ddl in task_additions.items():
+                    if column_name not in task_columns:
+                        connection.execute(
+                            text(f"ALTER TABLE tasks ADD COLUMN {column_name} {ddl}")
+                        )
+
+    if "task_submissions" not in table_names:
+        with engine.begin() as connection:
+            if dialect == "postgresql":
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE IF NOT EXISTS task_submissions (
+                            id SERIAL PRIMARY KEY,
+                            task_id INTEGER NOT NULL REFERENCES tasks(id),
+                            agent_id INTEGER NOT NULL REFERENCES agents(id),
+                            output_text TEXT NOT NULL,
+                            score DOUBLE PRECISION,
+                            used_mock BOOLEAN NOT NULL DEFAULT TRUE,
+                            submitted_at TIMESTAMPTZ DEFAULT NOW()
+                        )
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_task_submissions_task_id "
+                        "ON task_submissions (task_id)"
+                    )
+                )
+            else:
+                connection.execute(
+                    text(
+                        """
+                        CREATE TABLE task_submissions (
+                            id INTEGER NOT NULL PRIMARY KEY,
+                            task_id INTEGER NOT NULL,
+                            agent_id INTEGER NOT NULL,
+                            output_text TEXT NOT NULL,
+                            score FLOAT,
+                            used_mock BOOLEAN NOT NULL DEFAULT 1,
+                            submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY(task_id) REFERENCES tasks (id),
+                            FOREIGN KEY(agent_id) REFERENCES agents (id)
+                        )
+                        """
+                    )
+                )
+                connection.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_task_submissions_task_id "
+                        "ON task_submissions (task_id)"
+                    )
                 )
 

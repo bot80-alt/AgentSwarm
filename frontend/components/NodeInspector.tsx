@@ -21,12 +21,15 @@ export function NodeInspector({ node, config, models, disabled, onChange }: Node
     );
   }
 
+  const hasFilesystem = config.tools.includes("filesystem");
+  const hasCasper = config.tools.includes("casper");
+
   return (
     <section className="node-inspector">
       <div className="panel-header">
         <h2>{node.name}</h2>
         <p>
-          MCP-style sampling config for <code>{node.id}</code>
+          Agent config for <code>{node.id}</code>
         </p>
       </div>
 
@@ -67,6 +70,36 @@ export function NodeInspector({ node, config, models, disabled, onChange }: Node
             Serial
           </label>
         </fieldset>
+
+        <label className="checkbox-chip">
+          <input
+            type="checkbox"
+            checked={hasFilesystem}
+            disabled={disabled}
+            onChange={(event) => {
+              const tools = event.target.checked
+                ? [...new Set([...config.tools, "filesystem"])]
+                : config.tools.filter((tool) => tool !== "filesystem");
+              onChange(node.id, { tools });
+            }}
+          />
+          MCP local filesystem (read files in workspace)
+        </label>
+
+        <label className="checkbox-chip">
+          <input
+            type="checkbox"
+            checked={hasCasper}
+            disabled={disabled}
+            onChange={(event) => {
+              const tools = event.target.checked
+                ? [...new Set([...config.tools, "casper"])]
+                : config.tools.filter((tool) => tool !== "casper");
+              onChange(node.id, { tools });
+            }}
+          />
+          CSPR.cloud Casper MCP (on-chain read tools)
+        </label>
 
         <label>
           System persona
