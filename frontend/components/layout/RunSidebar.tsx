@@ -1,6 +1,7 @@
 "use client";
 
 import { Plus } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -8,6 +9,11 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
 import type { WorkflowRunSummary, WorkflowRunStatus } from "@/types";
+
+const SIDEBAR_WIDTH_KEY = "swarm-sidebar-width";
+const DEFAULT_WIDTH = 256;
+const MIN_WIDTH = 200;
+const MAX_WIDTH = 480;
 
 type RunSidebarProps = {
   runs: WorkflowRunSummary[];
@@ -31,6 +37,17 @@ function statusVariant(status: WorkflowRunStatus) {
   }
 }
 
+function readStoredWidth(): number {
+  if (typeof window === "undefined") {
+    return DEFAULT_WIDTH;
+  }
+  const stored = Number(localStorage.getItem(SIDEBAR_WIDTH_KEY));
+  if (Number.isFinite(stored) && stored >= MIN_WIDTH && stored <= MAX_WIDTH) {
+    return stored;
+  }
+  return DEFAULT_WIDTH;
+}
+
 export function RunSidebar({
   runs,
   activeRunId,
@@ -39,12 +56,68 @@ export function RunSidebar({
   onSelectRun,
   onNewRun,
 }: RunSidebarProps) {
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const isResizing = useRef(false);
+  const startX = useRef(0);
+  const startWidth = useRef(DEFAULT_WIDTH);
+
+  useEffect(() => {
+    setWidth(readStoredWidth());
+  }, []);
+
+  const handleResizeMove = useCallback((event: MouseEvent) => {
+    if (!isResizing.current) {
+      return;
+    }
+    const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, startWidth.current + event.clientX - startX.current));
+    setWidth(next);
+  }, []);
+
+  const handleResizeEnd = useCallback(() => {
+    if (!isResizing.current) {
+      return;
+    }
+    isResizing.current = false;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+    window.removeEventListener("mousemove", handleResizeMove);
+    window.removeEventListener("mouseup", handleResizeEnd);
+    setWidth((current) => {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(current));
+      return current;
+    });
+  }, [handleResizeMove]);
+
+  const handleResizeStart = useCallback(
+    (event: React.MouseEvent) => {
+      event.preventDefault();
+      isResizing.current = true;
+      startX.current = event.clientX;
+      startWidth.current = width;
+      document.body.style.cursor = "col-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("mousemove", handleResizeMove);
+      window.addEventListener("mouseup", handleResizeEnd);
+    },
+    [width, handleResizeMove, handleResizeEnd],
+  );
+
+  useEffect(() => {
+    return () => {
+      window.removeEventListener("mousemove", handleResizeMove);
+      window.removeEventListener("mouseup", handleResizeEnd);
+    };
+  }, [handleResizeMove, handleResizeEnd]);
+
   if (collapsed) {
     return null;
   }
 
   return (
-    <aside className="flex w-64 shrink-0 flex-col border-r border-border bg-card">
+    <aside
+      className="relative flex shrink-0 flex-col border-r border-border bg-card"
+      style={{ width }}
+    >
       <div className="p-3">
         <Button variant="outline" className="w-full justify-start gap-2" size="sm" onClick={onNewRun}>
           <Plus className="h-4 w-4" />
@@ -81,6 +154,14 @@ export function RunSidebar({
           ))}
         </div>
       </ScrollArea>
+
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        onMouseDown={handleResizeStart}
+        className="absolute -right-1 top-0 z-10 h-full w-2 cursor-col-resize touch-none hover:bg-border/60 active:bg-border"
+      />
     </aside>
   );
 }
