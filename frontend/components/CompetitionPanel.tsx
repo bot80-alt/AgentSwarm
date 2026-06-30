@@ -2,6 +2,12 @@
 
 import { FormEvent, useCallback, useEffect, useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
 import type { Agent, Competition, CompetitionEvaluateResult, CSPRStatus, SeedResponse } from "@/types";
 
@@ -122,128 +128,150 @@ export function CompetitionPanel() {
   }
 
   return (
-    <div className="competition-panel">
-      <header className="panel-header">
-        <div>
-          <h2>Escrow Competition</h2>
-          <p className="muted">
-            Post a task, lock bounty escrow, and let developer agents race. CSPR MCP verifies optional
-            on-chain account linkage.
-          </p>
-        </div>
-        <div className="badge-row">
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold">Escrow Competition</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Post a task, lock bounty escrow, and let developer agents race.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
           {csprStatus && (
-            <span className={`badge ${csprStatus.connected ? "badge-ok" : "badge-warn"}`}>
-              CSPR MCP: {csprStatus.connected ? "connected" : "offline"} ({csprStatus.network})
-            </span>
+            <Badge variant={csprStatus.connected ? "success" : "warning"}>
+              CSPR: {csprStatus.connected ? "connected" : "offline"} ({csprStatus.network})
+            </Badge>
           )}
-          {seed && (
-            <span className="badge">
-              Client wallet: ${seed.client.wallet_balance.toFixed(2)}
-            </span>
-          )}
+          {seed && <Badge variant="secondary">Wallet: ${seed.client.wallet_balance.toFixed(2)}</Badge>}
         </div>
-      </header>
-
-      {error && <p className="error-banner">{error}</p>}
-
-      <div className="competition-actions">
-        <button type="button" onClick={() => void handleSeed()} disabled={busy}>
-          Seed demo users
-        </button>
       </div>
 
-      <form className="competition-form" onSubmit={(e) => void handleCreate(e)}>
-        <label>
-          Task prompt
-          <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} required />
-        </label>
-        <label>
-          Success criteria
-          <textarea
-            value={successCriteria}
-            onChange={(e) => setSuccessCriteria(e.target.value)}
-            rows={2}
-            required
-          />
-        </label>
-        <label>
-          Bounty (USD demo wallet)
-          <input
-            type="number"
-            min="1"
-            step="0.01"
-            value={bounty}
-            onChange={(e) => setBounty(e.target.value)}
-            required
-          />
-        </label>
-        <label>
-          Casper account hash (optional)
-          <input
-            type="text"
-            value={casperAccountHash}
-            onChange={(e) => setCasperAccountHash(e.target.value)}
-            placeholder="account-hash for CSPR balance verification"
-          />
-        </label>
-        <button type="submit" disabled={busy}>
-          Create competition & lock escrow
-        </button>
-      </form>
+      {error && (
+        <div className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Setup</CardTitle>
+          <CardDescription>Seed demo users before creating a competition.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button type="button" onClick={() => void handleSeed()} disabled={busy}>
+            Seed demo users
+          </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Create competition</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form className="space-y-4" onSubmit={(e) => void handleCreate(e)}>
+            <div className="space-y-2">
+              <Label htmlFor="comp-prompt">Task prompt</Label>
+              <Textarea id="comp-prompt" value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={3} required />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="comp-criteria">Success criteria</Label>
+              <Textarea
+                id="comp-criteria"
+                value={successCriteria}
+                onChange={(e) => setSuccessCriteria(e.target.value)}
+                rows={2}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="comp-bounty">Bounty (USD demo wallet)</Label>
+              <Input
+                id="comp-bounty"
+                type="number"
+                min="1"
+                step="0.01"
+                value={bounty}
+                onChange={(e) => setBounty(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="comp-casper">Casper account hash (optional)</Label>
+              <Input
+                id="comp-casper"
+                type="text"
+                value={casperAccountHash}
+                onChange={(e) => setCasperAccountHash(e.target.value)}
+                placeholder="account-hash for CSPR balance verification"
+              />
+            </div>
+            <Button type="submit" disabled={busy}>
+              Create competition & lock escrow
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
       {competition && (
-        <section className="competition-detail">
-          <h3>Competition #{competition.id}</h3>
-          <p>
-            Status: <strong>{competition.status}</strong> | Escrow: ${competition.escrow_amount.toFixed(2)}
-          </p>
-          <div className="competition-buttons">
-            <button
-              type="button"
-              onClick={() => void handleCompete()}
-              disabled={busy || competition.status !== "pending"}
-            >
-              Start agent race
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleEvaluate()}
-              disabled={busy || competition.status !== "judging"}
-            >
-              Judge & release bounty
-            </button>
-          </div>
-
-          {competition.submissions && competition.submissions.length > 0 && (
-            <div className="submissions-list">
-              <h4>Submissions ({agents.length} agents registered)</h4>
-              {competition.submissions.map((submission) => (
-                <article
-                  key={submission.id}
-                  className={
-                    competition.winner_agent_id === submission.agent_id ? "submission winner" : "submission"
-                  }
-                >
-                  <header>
-                    Agent #{submission.agent_id}
-                    {submission.score != null && <span> — score {submission.score.toFixed(1)}</span>}
-                    {competition.winner_agent_id === submission.agent_id && (
-                      <span className="winner-tag">Winner</span>
-                    )}
-                  </header>
-                  <pre>{submission.output_text}</pre>
-                </article>
-              ))}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-base">Competition #{competition.id}</CardTitle>
+            <CardDescription>
+              Status: {competition.status} · Escrow: ${competition.escrow_amount.toFixed(2)}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                onClick={() => void handleCompete()}
+                disabled={busy || competition.status !== "pending"}
+              >
+                Start agent race
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void handleEvaluate()}
+                disabled={busy || competition.status !== "judging"}
+              >
+                Judge & release bounty
+              </Button>
             </div>
-          )}
 
-          {evaluateResult && (
-            <p className="judge-reasoning">
-              <strong>Judge:</strong> {evaluateResult.reasoning}
-            </p>
-          )}
-        </section>
+            {competition.submissions && competition.submissions.length > 0 && (
+              <div className="space-y-3">
+                <h4 className="text-sm font-medium">Submissions ({agents.length} agents registered)</h4>
+                {competition.submissions.map((submission) => {
+                  const isWinner = competition.winner_agent_id === submission.agent_id;
+                  return (
+                    <Card key={submission.id} className={isWinner ? "border-emerald-500/50" : undefined}>
+                      <CardHeader className="py-3">
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="font-medium">Agent #{submission.agent_id}</span>
+                          {submission.score != null && (
+                            <span className="text-muted-foreground">score {submission.score.toFixed(1)}</span>
+                          )}
+                          {isWinner && <Badge variant="success">Winner</Badge>}
+                        </div>
+                      </CardHeader>
+                      <CardContent className="pt-0">
+                        <pre className="max-h-48 overflow-auto rounded-md bg-secondary/50 p-3 text-xs">
+                          {submission.output_text}
+                        </pre>
+                      </CardContent>
+                    </Card>
+                  );
+                })}
+              </div>
+            )}
+
+            {evaluateResult && (
+              <p className="text-sm text-muted-foreground">
+                <span className="font-medium text-foreground">Judge:</span> {evaluateResult.reasoning}
+              </p>
+            )}
+          </CardContent>
+        </Card>
       )}
     </div>
   );
